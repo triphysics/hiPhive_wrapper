@@ -17,6 +17,7 @@
 # this program.  If not, see <http://www.gnu.org/licenses/>.                   #
 #                                                                              #
 ################################################################################
+#updated by triphysics to include cutoff distance as a matrix format
 
 import os
 import sys
@@ -205,6 +206,16 @@ def write_vasp_dirs(structures,infiles):
 		#shutil.copyfile(infiles+'/KPOINTS',  path+"/"+"KPOINTS")
 		#shutil.copyfile(infiles+'/POTCAR',   path+"/"+"POTCAR") 
 
+def reshape_to_matrix(flat_list):
+    """
+    Reshape a flat list of 9 elements into a 3x3 matrix.
+
+    Example input: [7.0, 5.0, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0, 2.5]
+    Output: [[7.0, 5.0, 3.0], [0.0, 4.0, 0.0], [0.0, 0.0, 2.5]]
+    """
+    if len(flat_list) != 9:
+        raise ValueError("The input list must contain exactly 9 elements.")
+    return [flat_list[i:i+3] for i in range(0, 9, 3)]
 
 def main():
 	parser = argparse.ArgumentParser()
@@ -215,7 +226,8 @@ def main():
 	parser.add_argument("-r", "--rat_mode",   type=str,   default="rattle",  help="Method for creating distorted supercells: rattle, mc or phon-rat")
 	parser.add_argument("-n", "--rat_n",      type=int,   default=20,        help="Number of structures to generate/read")
 	parser.add_argument("-a", "--rat_amp",    type=float, default=0.02,      help="Rattle amplitude (standard deviation in normal distribution)")
-	parser.add_argument('-c', '--cutoffs',    nargs='+',  default=[5],       help='List of cutoffs in AA')
+	parser.add_argument('-c', '--cutoffs',    nargs='+',  type=float, default=[5],       help='List of cutoffs in AA')
+    parser.add_argument('-cmat', '--cutoff_mat', nargs='+', type=float, help='List of 9 cutoff values to form a 3x3 matrix')
 	parser.add_argument(      '--temp',       nargs='+',  default=[300],     help='List of temperatures in K')
 	parser.add_argument(      "--scaleb",     type=float, default=0.1,       help="Scalebroad for CONTROL file")
 	parser.add_argument(      '--ngrid',      nargs='+',  default=["1","1","1"],   help='q-mesh density for ShengBTE input')
@@ -378,50 +390,51 @@ def main():
 		for i in lista:
 			print(counter,i)
 			counter = counter + 1
+    if mode == "post":
+        from hiphive import ClusterSpace, StructureContainer, ForceConstantPotential, force_constants
+        from trainstation import Optimizer
+        from hiphive import enforce_rotational_sum_rules
+        import math
 
-	if mode == "post":
-		from hiphive import ClusterSpace, StructureContainer, ForceConstantPotential, force_constants
-		from trainstation import Optimizer
-		from hiphive import enforce_rotational_sum_rules
-		import math 
+        folding = False
+        lim = []
+        if args.cutoff_mat is not None:
+            cutoffs = Cutoffs(cutoffs_raw)
+            print("Cutoffs = ", cutoffs)
+        else:
+            if cutoffs_raw[0] == "MAX":
+                border = []
+                border.append(np.linalg.norm(sc.cell[0]/2.0)-1e-02)
+                border.append(np.linalg.norm(sc.cell[1]/2.0)-1e-02)
+                border.append(np.linalg.norm(sc.cell[2]/2.0)-1e-02)
+                cutoffs_raw[0] = min(border)
+                folding = False
+            if cutoffs_raw[0] == "MAX2":
+                lim.append(np.linalg.norm(sc.cell[0]/2.0)-1e-02)
+                lim.append(np.linalg.norm(sc.cell[1]/2.0)-1e-02)
+                lim.append(np.linalg.norm(sc.cell[2]/2.0)-1e-02)
+                cutoffs_raw[0] = math.sqrt(lim[0]*lim[0]+lim[1]*lim[1]+lim[2]*lim[2])
+                folding = False
+            if cutoffs_raw[0] == "MAX3":
+                lim.append(np.linalg.norm(sc.cell[0]/2.0)+1e-02)
+                lim.append(np.linalg.norm(sc.cell[1]/2.0)+1e-02)
+                lim.append(np.linalg.norm(sc.cell[2]/2.0)+1e-02)
+                cutoffs_raw[0] = math.sqrt(lim[0]*lim[0]+lim[1]*lim[1]+lim[2]*lim[2])
+                folding = True
+                cutoffs_raw=[float(i) for i in cutoffs_raw]
 
-		folding = False
-		lim = []
-		if cutoffs_raw[0] == "MAX":
-			border = []
-			border.append(np.linalg.norm(sc.cell[0]/2.0)-1e-02)
-			border.append(np.linalg.norm(sc.cell[1]/2.0)-1e-02)
-			border.append(np.linalg.norm(sc.cell[2]/2.0)-1e-02)		
-			cutoffs_raw[0] = min(border)
-			folding = False
-		if cutoffs_raw[0] == "MAX2":
-			lim.append(np.linalg.norm(sc.cell[0]/2.0)-1e-02)
-			lim.append(np.linalg.norm(sc.cell[1]/2.0)-1e-02)
-			lim.append(np.linalg.norm(sc.cell[2]/2.0)-1e-02)		
-			cutoffs_raw[0] = math.sqrt(lim[0]*lim[0]+lim[1]*lim[1]+lim[2]*lim[2])
-			folding = False
-		if cutoffs_raw[0] == "MAX3":
-			lim.append(np.linalg.norm(sc.cell[0]/2.0)+1e-02)
-			lim.append(np.linalg.norm(sc.cell[1]/2.0)+1e-02)
-			lim.append(np.linalg.norm(sc.cell[2]/2.0)+1e-02)		
-			cutoffs_raw[0] = math.sqrt(lim[0]*lim[0]+lim[1]*lim[1]+lim[2]*lim[2])
-			folding = True
+            cutoffs = []
+            for x in cutoffs_raw:
+                if x > 0.0:
+                    cutoffs.append(x)
+                else:
+                    from hiphive.utilities import get_neighbor_shells
+                    lista = get_neighbor_shells(sc,15)
+                    index = int(abs(x))+1
+                    value = lista[index].distance - 0.05
+                    cutoffs.append(value)
 
-		cutoffs_raw=[float(i) for i in cutoffs_raw]
-		cutoffs = []
-
-		for x in cutoffs_raw:
-			if x > 0.0:
-				cutoffs.append(x)
-			else:
-				from hiphive.utilities import get_neighbor_shells
-				lista = get_neighbor_shells(sc,15)
-				index = int(abs(x))+1
-				value = lista[index].distance - 0.05
-				cutoffs.append(value)
-
-		print("Cutoffs = ", cutoffs)
-
+            print("Cutoffs = ", cutoffs)
 
 		#Read VASP OUTPUTS and extract positions, displacements and forces
 		print("Reading "+str(rat_n)+"_VASP xml files")
@@ -499,8 +512,9 @@ def main():
 					labell = labell+xx+"_"
 				dirname="DIR_cutoff"+labell+"n_"+str(rat_n)+"_"+fit_method+"_tf_"+str(size)
 				os.mkdir(dirname)
+				os.chdir(dirname)
 				fcp.write('Potential.fcp')
-				os.rename("Potential.fcp", dirname+"/"+"Potential.fcp")
+				#os.rename("Potential.fcp", dirname+"/"+"Potential.fcp")
 				print("We finished Potencial.cp") 
 				#Obtain Force constants (fcs) using fcp
 				print("Build FCS")
@@ -533,16 +547,18 @@ def main():
 					print("Printing files")
 					fcs.write_to_phonopy("FORCE_CONSTANTS_2ND", format="text")
 					fcs_3rd.write_to_shengBTE("FORCE_CONSTANTS_3RD", pc)
-					os.rename("FORCE_CONSTANTS_3RD", dirname+"/"+"FORCE_CONSTANTS_3RD")
-					os.rename("FORCE_CONSTANTS_2ND", dirname+"/"+"FORCE_CONSTANTS_2ND")
+					fcs.write_to_phonopy('fc2.hdf5')
+                    fcs.write_to_phono3py('fc3.hdf5')
 				else:
 					fcs = fcp.get_force_constants(sc)
 					#Print ShengBTE files
 					print("Printing files")
 					fcs.write_to_phonopy("FORCE_CONSTANTS_2ND", format="text")
 					fcs.write_to_shengBTE("FORCE_CONSTANTS_3RD", pc)
-					os.rename("FORCE_CONSTANTS_3RD", dirname+"/"+"FORCE_CONSTANTS_3RD")
-					os.rename("FORCE_CONSTANTS_2ND", dirname+"/"+"FORCE_CONSTANTS_2ND")
+			        fcs.write_to_phonopy('fc2.hdf5')
+                    fcs.write_to_phono3py('fc3.hdf5')
+			    os.chdir('..')
+
 		#stc.clear()
 		#structures.clear()
 
